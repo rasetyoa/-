@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Vision Pro 风格捏星体演示</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            overflow: hidden;
+            font-family: sans-serif;
+        }
+
+        /* 视频元素隐藏，我们只在 Canvas 上画图 */
+        .input_video {
+            display: none;
+        }
+
+        /* Canvas 铺满全屏 */
+        .output_canvas {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            /* 镜像翻转，这样操作才符合直觉 */
+            transform: scaleX(-1); 
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 20px;
+            text-align: center;
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        .instruction {
+            position: absolute;
+            bottom: 20px;
+            width: 100%;
+            text-align: center;
+            color: rgba(255, 255, 255, 0.8);
+            font-size: 14px;
+            z-index: 5;
+            pointer-events: none;
+            /* 文字不翻转，所以要反向翻转回来或者设为 fixed 不受 canvas 影响，这里简单处理 */
+            text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loading">正在加载 AI 模型...<br>请允许摄像头权限</div>
+    <div class="instruction">伸出手，用<b>拇指</b>和<b>食指</b>捏住星星移动</div>
+
+    <video class="input_video"></video>
+    <canvas class="output_canvas"></canvas>
+
+    <script>
+        const videoElement = document.getElementsByClassName('input_video')[0];
+        const canvasElement = document.getElementsByClassName('output_canvas')[0];
+        const canvasCtx = canvasElement.getContext('2d');
+        const loadingDiv = document.getElementById('loading');
+
+        // 星体对象
+        let star = {
+            x: 0.5, // 归一化坐标 (0.0 - 1.0)
+            y: 0.5,
+            radius: 40, // 像素
+            isDragging: false,
+            glow: 0
+        };
+
+        // 调整 Canvas 尺寸适配屏幕
+        function resizeCanvas() {
+            canvasElement.width = window.innerWidth;
+            canvasElement.height = window.innerHeight;
+            // 初始星星位置在屏幕中心
+            star.x = window.innerWidth / 2;
+            star.y = window.innerHeight / 2;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // 核心逻辑：每帧处理
+        function onResults(results) {
+            loadingDiv.style.display = 'none';
+
+            // 1. 绘制摄像头背景
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            // 2. 检测手势
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                for (const landmarks of results.multiHandLandmarks) {
+                    
+                    // 获取关键点：4=拇指尖，8=食指尖
+                    const thumb = landmarks[4];
+                    const indexFinger = landmarks[8];
+
+                    // 转换由于镜像引起的坐标反转问题，MediaPipe 输出是归一化的 0-1
+                    // 在 canvas 上绘制时，x 坐标需要翻转一下对应屏幕像素
+                    // 注意：因为 CSS 翻转了 canvas，我们逻辑坐标计算也按照"视觉"来
+                    const thumbX = (1 - thumb.x) * canvasElement.width;
+                    const thumbY = thumb.y * canvasElement.height;
+                    const indexX = (1 - indexFinger.x) * canvasElement.width;
+                    const indexY = indexFinger.y * canvasElement.height;
+
+                    // 计算两指距离 (欧几里得距离)
+                    const distance = Math.hypot(indexX - thumbX, indexY - thumbY);
+                    
+                    // 计算两指中心点 (捏合中心)
+                    const centerX = (thumbX + indexX) / 2;
+                    const centerY = (thumbY + indexY) / 2;
+
+                    // 绘制手指连接线 (视觉辅助)
+                    canvasCtx.beginPath();
+                    canvasCtx.moveTo(thumbX, thumbY);
+                    canvasCtx.lineTo(indexX, indexY);
+                    canvasCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+                    canvasCtx.lineWidth = 2;
+                    canvasCtx.stroke();
+
+                    // === 交互逻辑 ===
+                    // 阈值：距离小于 60 像素视为捏合
+                    const PINCH_THRESHOLD = 60; 
+                    const isPinching = distance < PINCH_THRESHOLD;
+
+                    if (isPinching) {
+                        // 绘制捏合点高亮
+                        canvasCtx.beginPath();
+                        canvasCtx.arc(centerX, centerY, 10, 0, 2 * Math.PI);
+                        canvasCtx.fillStyle = '#00ff00';
+                        canvasCtx.fill();
+
+                        // 碰撞检测：捏合点是否在星星范围内
+                        const distToStar = Math.hypot(centerX - star.x, centerY - star.y);
+                        
+                        if (!star.isDragging && distToStar < star.radius + 30) {
+                            // 开始拖拽
+                            star.isDragging = true;
+                        }
+                    } else {
+                        // 松开手指
+                        star.isDragging = false;
+                    }
+
+                    // 如果处于拖拽状态，更新星星位置
+                    if (star.isDragging) {
+                        star.x = centerX;
+                        star.y = centerY;
+                        star.glow = 30; // 拖拽时发光增强
+                    } else {
+                        star.glow = 15;
+                    }
+                }
+            } else {
+                star.isDragging = false;
+            }
+
+            // 3. 绘制星星
+            drawStar(star.x, star.y, star.radius, star.glow);
+
+            canvasCtx.restore();
+        }
+
+        // 绘制发光星星的函数
+        function drawStar(x, y, r, glowBlur) {
+            canvasCtx.beginPath();
+            canvasCtx.arc(x, y, r, 0, 2 * Math.PI);
+            
+            // 径向渐变，模拟球体
+            const gradient = canvasCtx.createRadialGradient(x, y, r * 0.2, x, y, r);
+            if (star.isDragging) {
+                gradient.addColorStop(0, '#fff');
+                gradient.addColorStop(1, '#e74c3c'); // 拖拽变红
+            } else {
+                gradient.addColorStop(0, '#fff');
+                gradient.addColorStop(1, '#3498db'); // 默认蓝色
+            }
+
+            canvasCtx.fillStyle = gradient;
+            
+            // 发光效果
+            canvasCtx.shadowColor = star.isDragging ? '#e74c3c' : '#3498db';
+            canvasCtx.shadowBlur = glowBlur;
+            
+            canvasCtx.fill();
+            canvasCtx.shadowBlur = 0; // 重置
+        }
+
+        // 初始化 MediaPipe Hands
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+
+        hands.setOptions({
+            maxNumHands: 1, // 只追踪一只手
+            modelComplexity: 1, // 0=最快, 1=均衡 (手机推荐), 2=最准
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        // 初始化摄像头
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 1280,
+            height: 720
+        });
+        
+        camera.start();
+    </script>
+</body>
+</html>
